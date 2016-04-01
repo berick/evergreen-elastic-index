@@ -24,7 +24,6 @@ es.indices.create(
                 'analyzer': {
                     'ducet_sort': {
                         'tokenizer': 'keyword',
-                        'filter': 'icu_collation',
                     },
                     'folding': {
                         'filter': ['lowercase', 'asciifolding'],
