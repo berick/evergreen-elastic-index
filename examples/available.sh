@@ -10,7 +10,12 @@ curl -XPOST "$ES_URL/$ES_INDEX/_search?pretty=true" -d '
                 "match": {"_all": "smith"}
             },
             "filter": {
-                "term": {"holdings.status": "Available"}
+              "nested": {
+                "path": "holdings",
+                "filter": {
+                  "term": {"holdings.status": "Available"}
+                }
+              }
             }
         }
     },
@@ -25,9 +30,18 @@ curl -XPOST "$ES_URL/$ES_INDEX/_search?pretty=true" -d '
                 "field": "author"
             }
         },
-        "availability": {
-            "terms": {
-                "field": "holdings.status"
+        "holdings": {
+            "nested": {
+              "path": "holdings"
+            },
+            "aggs": {
+                "availability": {
+                  "terms": {"field": "holdings.status"}
+                },
+                "location": {
+                  "terms": {"field": "holdings.location"}
+                }
+
             }
         },
         "type_of_resource": {
