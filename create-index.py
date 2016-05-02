@@ -262,6 +262,11 @@ es.indices.put_mapping(
                             'include_in_all': 'false',
                         },
                     }
+                },
+                'hold_count': {
+                    'type': 'integer',
+                    'index': 'not_analyzed',
+                    'include_in_all': 'false',
                 }
             }
         }
