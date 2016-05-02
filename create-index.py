@@ -136,7 +136,7 @@ es.indices.put_mapping(
                 },
                 'genres': {
                     'type': 'string',
-                    'norms': { 'enabled': 'false' },
+                    'norms': {'enabled': 'false'},
                     'fields': {
                         "raw": {
                             'type': 'string',
@@ -157,7 +157,7 @@ es.indices.put_mapping(
                 },
                 'subjects': {
                     'type': 'string',
-                    'norms': { 'enabled': 'false' },
+                    'norms': {'enabled': 'false'},
                     'fields': {
                         "raw": {
                             'type': 'string',
@@ -178,7 +178,7 @@ es.indices.put_mapping(
                 },
                 'author_other': {
                     'type': 'string',
-                    'norms': { 'enabled': 'false' },
+                    'norms': {'enabled': 'false'},
                     'fields': {
                         "raw": {
                             'type': 'string',
