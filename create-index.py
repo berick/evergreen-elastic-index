@@ -27,6 +27,7 @@ if (es.ping()):
 
 if es.indices.exists(index_name):
     logging.error("Index already exists: %s" % (index_name))
+    #es.indices.delete(index_name)
     sys.exit(1)
 
 es.indices.create(
@@ -72,7 +73,6 @@ es.indices.put_mapping(
                         "raw": {
                             "type": "string",
                             "index": "not_analyzed",
-                            "include_in_all": "false",
                         },
                     },
                 },
@@ -84,12 +84,10 @@ es.indices.put_mapping(
                         "folded": {
                             "type": "string",
                             "analyzer": "folding",
-                            'include_in_all': 'false',
                         },
                         "raw": {
                             "type": "string",
                             "index": "not_analyzed",
-                            "include_in_all": "false",
                         },
                     },
                 },
@@ -101,12 +99,10 @@ es.indices.put_mapping(
                         "folded": {
                             "type": "string",
                             "analyzer": "folding",
-                            'include_in_all': 'false',
                         },
                         "raw": {
                             "type": "string",
                             "index": "not_analyzed",
-                            "include_in_all": "false",
                         },
                     },
                 },
@@ -118,12 +114,10 @@ es.indices.put_mapping(
                         "folded": {
                             "type": "string",
                             "analyzer": "folding",
-                            'include_in_all': 'false',
                         },
                         "raw": {
                             "type": "string",
                             "index": "not_analyzed",
-                            "include_in_all": "false",
                         },
                     },
                 },
@@ -135,12 +129,10 @@ es.indices.put_mapping(
                         'folded': {
                             'type': 'string',
                             'analyzer': 'folding',
-                            'include_in_all': 'false',
                         },
                         'sort': {
                             'type': 'string',
                             'analyzer': 'ducet_sort',
-                            'include_in_all': 'false',
                         },
                     },
                 },
@@ -156,7 +148,6 @@ es.indices.put_mapping(
                         "raw": {
                             'type': 'string',
                             'index': 'not_analyzed',
-                            'include_in_all': 'false',
                         },
                     }
                 },
@@ -166,7 +157,6 @@ es.indices.put_mapping(
                         "raw": {
                             'type': 'string',
                             'index': 'not_analyzed',
-                            'include_in_all': 'false',
                         },
                     }
                 },
@@ -177,7 +167,6 @@ es.indices.put_mapping(
                         "raw": {
                             'type': 'string',
                             'index': 'not_analyzed',
-                            'include_in_all': 'false',
                         },
                     }
                 },
@@ -187,7 +176,6 @@ es.indices.put_mapping(
                         "raw": {
                             'type': 'string',
                             'index': 'not_analyzed',
-                            'include_in_all': 'false',
                         },
                     }
                 },
@@ -198,7 +186,6 @@ es.indices.put_mapping(
                         "raw": {
                             'type': 'string',
                             'index': 'not_analyzed',
-                            'include_in_all': 'false',
                         },
                     }
                 },
@@ -208,7 +195,6 @@ es.indices.put_mapping(
                         "raw": {
                             'type': 'string',
                             'index': 'not_analyzed',
-                            'include_in_all': 'false',
                         },
                     }
                 },
