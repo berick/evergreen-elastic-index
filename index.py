@@ -51,7 +51,7 @@ if (es.ping()):
 today = date.today()
 today_string = today.strftime("%Y%m%d")
 
-es_index = es_index + '_' + today_string
+#es_index = es_index + '_' + today_string
 
 if es.indices.exists(es_index) is False:
     logging.error("Index does not exist: %s" % (es_index))

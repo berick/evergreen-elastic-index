@@ -20,7 +20,7 @@ index_name = config['elasticsearch']['index']
 today = date.today()
 today_string = today.strftime("%Y%m%d")
 
-index_name = index_name + '_' + today_string
+#index_name = index_name + '_' + today_string
 
 if (es.ping()):
     print("ping!")
