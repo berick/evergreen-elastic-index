@@ -309,33 +309,35 @@ def index_holdings(conn, record_ids):
     cur = conn.cursor()
 
     cur.execute('''
-SELECT acn.record, acp.id AS copy_id, acp.barcode, ccs.name AS status,
-    aou.shortname AS circ_lib, acl.id AS location_id,
-    acl.name AS location, acn.label AS call_number, ocirc.due_date::DATE
+SELECT acn.record, 
+    acp.id AS copy, 
+    acp.barcode, 
+    acp.status AS status, 
+    acp.circ_lib AS circ_lib, 
+    acp.location AS location,
+    acn.id AS call_number,
+    acn.label AS call_number_label
 FROM asset.copy acp
-JOIN config.copy_status ccs ON acp.status = ccs.id
-JOIN asset.copy_location acl ON acp.location = acl.id
-JOIN actor.org_unit aou ON acp.circ_lib = aou.id
 JOIN asset.call_number acn ON acp.call_number = acn.id
-JOIN asset.opac_visible_copies aovc ON acp.id = aovc.copy_id
-LEFT JOIN action.open_circulation ocirc ON ocirc.target_copy = acp.id
 WHERE acn.record = ANY(%(record_ids)s::BIGINT[])
-AND acp.circ_lib IN (SELECT id FROM actor.org_unit_descendants(%(org_root)s))
-''', {'record_ids': record_ids, 'org_root': org_root})
+''', {'record_ids': record_ids})
 
-    for (record, copy_id, barcode, status, circ_lib, location_id, location,
-         call_number, due_date) in cur:
+    for (record, copy, barcode, status, circ_lib, 
+        location, call_number, call_number_label) in cur:
         holdings_count += 1
         logging.debug(
-            [record, copy_id, barcode, status, circ_lib, location_id, location,
-             call_number, due_date])
+            [record, copy, barcode, status, circ_lib, location, 
+                call_number, call_number_label])
         if record not in holdings_dict:
             holdings_dict[record] = []
-        holdings_dict[record].append(
-            {'barcode': barcode, 'status': status,
-             'circ_lib': circ_lib, 'location_id': location_id,
-             'location': location, 'call_number': call_number,
-             'due_date': due_date})
+        holdings_dict[record].append({
+            'barcode': barcode, 
+            'status': status, 
+            'circ_lib': circ_lib, 
+            'location': location,
+            'call_number': call_number,
+            'call_number_label': call_number_label
+        })
     logging.info('Fetched %s holdings.' % (holdings_count,))
     return holdings_dict
 
@@ -412,22 +414,9 @@ def full_index_page(egconn, state):
     last_id = state['last_id']
 
     egcur.execute('''
-WITH visible AS (
-SELECT record
-FROM asset.opac_visible_copies aovc
-WHERE circ_lib IN (SELECT id FROM actor.org_unit_descendants(%(org_root)s))
-UNION
-SELECT record
-FROM asset.call_number acn
-WHERE label = '##URI##' AND owning_lib IN (
-    SELECT id FROM actor.org_unit_descendants(%(org_root)s)
-)
-AND NOT acn.deleted
-)
 SELECT bre.id, bre.marc, bre.create_date, bre.edit_date, cbs.source
 FROM biblio.record_entry bre
 LEFT JOIN config.bib_source cbs ON bre.source = cbs.id
-JOIN visible ON visible.record = bre.id
 WHERE (
     NOT bre.deleted
     AND bre.active
