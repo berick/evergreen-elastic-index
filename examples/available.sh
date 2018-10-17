@@ -4,50 +4,59 @@
 
 curl -XPOST "$ES_URL/$ES_INDEX/_search?pretty=true" -d '
 {
-    "query": {
-        "filtered": {
-            "query": {
-                "match": {"_all": "smith"}
-            },
-            "filter": {
-              "nested": {
-                "path": "holdings",
-                "filter": {
-                  "term": {"holdings.status": "Available"}
-                }
-              }
-            }
+  "query": {
+    "bool": {
+      "must": {
+        "match": {
+          "title": "piano"
         }
-    },
-    "aggs": {
-        "genres": {
-            "terms": {
-                "field": "genres"
-            }
-        },
-        "authors": {
-            "terms": {
-                "field": "author"
-            }
-        },
-        "holdings": {
-            "nested": {
-              "path": "holdings"
-            },
-            "aggs": {
-                "availability": {
-                  "terms": {"field": "holdings.status"}
-                },
-                "location": {
-                  "terms": {"field": "holdings.location"}
-                }
-
-            }
-        },
-        "type_of_resource": {
-            "terms": {
-                "field": "type_of_resource"
-            }
+      },
+      "filter": {
+        "nested": {
+          "path": "holdings",
+          "query": {
+            "terms": {"holdings.status": ["0", "7"]}
+          }
         }
+      }
     }
+  },
+  "aggs": {
+    "genres": {
+      "terms": {
+        "field": "genres.raw"
+      }
+    },
+    "series": {
+      "terms": {
+        "field": "series.raw"
+      }
+    },
+    "authors": {
+      "terms": {
+        "field": "author.raw"
+      }
+    },
+    "holdings": {
+      "nested": {
+        "path": "holdings"
+      },
+      "aggs": {
+        "availability": {
+          "terms": {"field": "holdings.status"}
+        },
+        "location": {
+          "terms": {"field": "holdings.location"}
+        }
+
+      }
+    },
+    "type_of_resource": {
+      "terms": {
+        "field": "type_of_resource"
+      }
+    }
+  }
 }'
+
+
