@@ -133,16 +133,8 @@ transform = ET.XSLT(xslt)
 
 
 def insert_to_elasticsearch(output):
-    if output['holdings'] == [] and output['links'] == '':
-        try:
-            logging.info('Removing record ID %s' % (output['id'],))
-            deleteresult = es.delete(index=es_index, doc_type='record', id=output['id'])
-        except(elasticsearch.exceptions.NotFoundError):
-            logging.info('Record ID %s not found. No big deal.' % (output['id'],))
-            pass
-    else:
-        indexresult = es.index(index=es_index, doc_type='record', id=output['id'], body=output)
-        logging.debug(repr(indexresult))
+    indexresult = es.index(index=es_index, doc_type='record', id=output['id'], body=output)
+    logging.debug(repr(indexresult))
 
 
 def detect_large_print(record):
@@ -260,6 +252,34 @@ def get_901c(record):
 
     return id
 
+def get_marc_call_number(record):
+    marc_cn = None
+
+    match = record.xpath("marc:datafield[@tag='092']/marc:subfield[@code='a']", 
+        namespaces=namespace_dict)
+
+    if len(match):
+        marc_cn = match[0].text
+    else:
+        match = record.xpath(
+            "marc:datafield[@tag='092']/marc:subfield[@code='b']", 
+            namespaces=namespace_dict
+        )
+
+        if len(match):
+            marc_cn = match[0].text
+        else:
+            match = record.xpath(
+                "marc:datafield[@tag='099']/marc:subfield[@code='a']", 
+                namespaces=namespace_dict
+            )
+
+            if len(match):
+                marc_cn = match[0].text
+
+    logging.debug('Found record MARC call number %s' % marc_cn)
+
+    return marc_cn
 
 def index_mods(rec_id, mods):
     output = {}
@@ -309,35 +329,40 @@ def index_holdings(conn, record_ids):
     cur = conn.cursor()
 
     cur.execute('''
-SELECT acn.record, 
-    acp.id AS copy, 
-    acp.barcode, 
+SELECT 
+    COUNT(*) AS count,
+    acn.record, 
     acp.status AS status, 
     acp.circ_lib AS circ_lib, 
     acp.location AS location,
-    acn.id AS call_number,
-    acn.label AS call_number_label
+    acp.circulate AS circulate,
+    acp.opac_visible AS opac_visible
 FROM asset.copy acp
 JOIN asset.call_number acn ON acp.call_number = acn.id
-WHERE acn.record = ANY(%(record_ids)s::BIGINT[])
+WHERE 
+    NOT acp.deleted AND
+    NOT acn.deleted AND
+    acn.record = ANY(%(record_ids)s::BIGINT[])
+GROUP BY 2, 3, 4, 5, 6, 7
 ''', {'record_ids': record_ids})
 
-    for (record, copy, barcode, status, circ_lib, 
-        location, call_number, call_number_label) in cur:
+    for (   count, record, status, circ_lib, 
+            location, circulate, opac_visible) in cur:
+
         holdings_count += 1
-        logging.debug(
-            [record, copy, barcode, status, circ_lib, location, 
-                call_number, call_number_label])
+
         if record not in holdings_dict:
             holdings_dict[record] = []
+
         holdings_dict[record].append({
-            'barcode': barcode, 
+            'count': count,
             'status': status, 
             'circ_lib': circ_lib, 
             'location': location,
-            'call_number': call_number,
-            'call_number_label': call_number_label
+            'circulate': circulate,
+            'opac_visbile': opac_visible
         })
+
     logging.info('Fetched %s holdings.' % (holdings_count,))
     return holdings_dict
 
@@ -456,6 +481,7 @@ LIMIT 1000
         output = index_mods(bre_id, mods)
         output['id'] = bre_id
         output['title_display'] = get_title_display(bre_id, record, output)
+        output['marc_cn'] = get_marc_call_number(record)
 
         if output['links']:
             for link in output['links']:
