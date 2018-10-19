@@ -34,24 +34,11 @@ es_index = config['elasticsearch']['index']
 
 org_root = config.get('evergreen', 'org_root', fallback=1)
 
-# FIXME: Hardcoded for now
-game_genre_suffixes = {
-    'Nintendo Wii U video games.': '(Wii U)',
-    'Nintendo Wii video games.': '(Wii)',
-    'PlayStation 3 video games.': '(PS3)',
-    'PlayStation 2 video games.': '(PS2)',
-    'PlayStation 4 video games.': '(PS4)',
-    'Xbox 360 video games.': '(Xbox 360)',
-    'Xbox video games.': '(Xbox)',
-}
-
 if (es.ping()):
     print("ping!")
 
 today = date.today()
 today_string = today.strftime("%Y%m%d")
-
-#es_index = es_index + '_' + today_string
 
 if es.indices.exists(es_index) is False:
     logging.error("Index does not exist: %s" % (es_index))
@@ -118,6 +105,14 @@ indexes = {
         'xpath': "//mods32:mods/mods32:identifier[@type='isbn']",
         'array': True
     },
+    'issn': {
+        'xpath': "//mods32:mods/mods32:identifier[@type='issn']",
+        'array': True
+    },
+    'upc': {
+        'xpath': "//mods32:mods/mods32:identifier[@type='upc']",
+        'array': True
+    },
     'series': {
         'xpath': "//mods32:mods/mods32:relatedItem[@type='series']/mods32:titleInfo/mods32:title",
         'array': True
@@ -131,62 +126,9 @@ indexes = {
 xslt = ET.parse(xsl_filename)
 transform = ET.XSLT(xslt)
 
-
 def insert_to_elasticsearch(output):
     indexresult = es.index(index=es_index, doc_type='record', id=output['id'], body=output)
     logging.debug(repr(indexresult))
-
-
-def detect_large_print(record):
-    matches = record.xpath('//*[@tag="250" or @tag="300" '
-                           'or @tag="650" or @tag="655"]/*[@code="a"]',
-                           namespaces=namespace_dict)
-    if (len(matches)):
-        for match in matches:
-            if match.text and re.search(r"large (print|type)",
-                                        match.text, flags=re.IGNORECASE):
-                return True
-    return False
-
-
-def get_title_display(rec_id, record, output):
-    title_match = record.xpath('//*[@tag="245"]/*[@code]',
-                               namespaces=namespace_dict)
-    if (len(title_match)):
-        title_parts = []
-        for subfield in title_match:
-            code = subfield.get("code")
-            value = subfield.text
-            if value:
-                if code == 'a':
-                    title_parts.append(value)
-                elif code == 'b':
-                    title_parts.append(value)
-                elif code == 'c':
-                    # omit
-                    pass
-                elif code == 'h':
-                    # include only trailing punctuation
-                    match = re.search('([:;/])\s*$', value)
-                    if (match):
-                        title_parts.append(match.group(0))
-                else:
-                    title_parts.append(value)
-        title_display = ' '.join(title_parts)
-        # Strip trailing punctuation from title
-        title_display = re.sub('\s*[:;/]\s*$', '', title_display)
-        # Append (LARGE PRINT) where appropriate
-        if detect_large_print(record):
-            title_display += ' (LARGE PRINT)'
-        else:
-            # If not large print, check for videogame platform suffix
-            for genre in output['genres']:
-                if genre in game_genre_suffixes:
-                    title_display += ' ' + game_genre_suffixes[genre]
-        return title_display
-    else:
-        logging.warn('Found no title for record %s' % (rec_id,))
-
 
 def get_titles_misc(rec_id, mods):
     # We'd like to return two things:
@@ -480,7 +422,6 @@ LIMIT 1000
         mods = transform(record)
         output = index_mods(bre_id, mods)
         output['id'] = bre_id
-        output['title_display'] = get_title_display(bre_id, record, output)
         output['marc_cn'] = get_marc_call_number(record)
 
         if output['links']:
@@ -589,7 +530,6 @@ WHERE bre.id = %s""", (record_id,))
         mods = transform(record)
         output = index_mods(bre_id, mods)
         output['id'] = bre_id
-        output['title_display'] = get_title_display(bre_id, record, output)
 
         if output['links']:
             for link in output['links']:
@@ -684,7 +624,6 @@ LIMIT 1000
         mods = transform(record)
         output = index_mods(bre_id, mods)
         output['id'] = bre_id
-        output['title_display'] = get_title_display(bre_id, record, output)
 
         if output['links']:
             for link in output['links']:
@@ -773,7 +712,6 @@ if (xml_filename):
         mods = transform(record)
         output = index_mods(rec_id, mods)
         output['id'] = rec_id
-        output['title_display'] = get_title_display(rec_id, record, output)
         output['create_date'] = None
         output['edit_date'] = None
         insert_to_elasticsearch(output)

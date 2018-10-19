@@ -8,18 +8,18 @@
 curl -XPOST "$ES_URL/$ES_INDEX/_search?pretty=true" -d '
 {
   "query": {
-   "bool": {
-     "must": {
-          "query_string": {
-            "default_field": "_all",
-            "query": "piano && author:mozart"
-          }
+    "bool": {
+      "must": {
+        "query_string": {
+          "default_field": "_all",
+          "query": "piano && author:mozart"
+        }
       },
       "filter": {
         "nested": {
           "path": "holdings",
           "query": {
-            "term": {"holdings.status": "0"}
+            "terms": {"holdings.status": ["0", "7"]}
           }
         }
       }

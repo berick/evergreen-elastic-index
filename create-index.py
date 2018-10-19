@@ -27,7 +27,6 @@ if (es.ping()):
 
 if es.indices.exists(index_name):
     logging.error("Index already exists: %s" % (index_name))
-    #es.indices.delete(index_name)
     sys.exit(1)
 
 es.indices.create(
