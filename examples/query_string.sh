@@ -18,7 +18,7 @@ curl -s -XPOST "$ES_URL/$ES_INDEX/_search?pretty=true" -d '
       "must": {
         "query_string": {
           "default_field": "keyword",
-          "query": "piano && author:mozart"
+          "query": "(piano && author:mozart) || (ready && author:cline)"
         }
       },
       "filter": {

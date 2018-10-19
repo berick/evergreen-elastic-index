@@ -5,8 +5,7 @@
 # configuration.
 #
 # TODO 
-# * finer grained index configs per field
-# * index facet fields for 'aggs'
+# * index some display values for sorting, title/author/etc.
 
 import configparser
 import logging
@@ -312,21 +311,18 @@ def extract_search_field_values(marc_xml_doc, output):
         xpres = xform_doc.xpath(xpath_str, namespaces=xml_namespaces)
 
         # NOTE: multiple values are squashed into a single string
-        field_val = None
-        for elm in xpres:
-            new_txt = ' '.join(elm.itertext())
+        #field_vals = []
+        #for elm in xpres:
+            #field_vals.append(' '.join(elm.itertext()))
 
-            if field_val is None:
-                field_val = new_txt
-            else:
-                field_val = field_val + ' ' + new_txt
+        field_vals = [' '.join(elm.itertext()) for elm in xpres]
 
-        logging.debug('Extracted %s = %s' % (field_name, field_val))
+        logging.debug('Extracted %s = %s' % (field_name, repr(field_vals)))
 
         if search_def['search_field']:
-            output[field_name] = field_val
+            output[field_name] = field_vals
 
-        output[field_name + '_raw'] = field_val
+        output[field_name + '_raw'] = field_vals
 
 
 def full_index_page(state):
