@@ -7,12 +7,17 @@
 
 curl -XPOST "$ES_URL/$ES_INDEX/_search?pretty=true" -d '
 {
+  "sort": [
+    {"title_maintitle.raw": "asc" },
+    {"author_personal.raw": "asc" },
+    "_score"
+  ],
   "query": {
     "bool": {
       "must": {
         "query_string": {
-          "default_field": "_all",
-          "query": "piano && author:mozart"
+          "default_field": "keyword_keyword",
+          "query": "piano && author_personal:mozart"
         }
       },
       "filter": {

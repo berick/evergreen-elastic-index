@@ -1,274 +1,221 @@
 #!/usr/bin/env python
 
-# xpath work Based partially on an example from
-# http://stackoverflow.com/a/16699042/157515
+# -----------------------------------------------------------------------
+# Create elasticsearch indexes from Evergreen config.metabib_field 
+# configuration.
+#
+# TODO 
+# * finer grained index configs per field
+# * index facet fields for 'aggs'
+# * 'analyzer': 'english' ?
 
-import argparse
+import configparser
 import logging
 import logging.config
-import re
 import sys
-import time
-from datetime import date
-
-import configparser  # under Python 2, this is a backport
-import lxml.etree as ET
+import argparse
 import psycopg2
+import time
+
+import lxml.etree as ET
+from io import BytesIO
+from datetime import date
 from elasticsearch import Elasticsearch
-import elasticsearch.exceptions
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--id')
-parser.add_argument('--full', action='store_true')
-parser.add_argument('--incremental', action='store_true')
+db_conn = None
 
-args = parser.parse_args()
+# cache of XSL transform docs
+xsl_docs = {}
+xml_namespaces = {}
+# cache of config.metabib_field where search_field = true
+search_fields = {}
 
-logging.config.fileConfig('index-config.ini')
-config = configparser.ConfigParser()
-config.read('index-config.ini')
+index_name = None
 
-es = Elasticsearch([config['elasticsearch']['url']])
-
-es_index = config['elasticsearch']['index']
-
-org_root = config.get('evergreen', 'org_root', fallback=1)
-
-if (es.ping()):
-    print("ping!")
-
-today = date.today()
-today_string = today.strftime("%Y%m%d")
-
-if es.indices.exists(es_index) is False:
-    logging.error("Index does not exist: %s" % (es_index))
-    sys.exit(1)
-
-docs_count = es.indices.stats(es_index)['indices'][es_index]['total']['docs']['count']
-
-xml_filename = None
-xsl_filename = 'MARC21slim2MODS3-2.xsl'
-
-namespace_dict = {
-    'mods32': 'http://www.loc.gov/mods/v3',
-    'marc': 'http://www.loc.gov/MARC21/slim',
-}
-
-indexes = {
-    'title': {
-        'xpath': "//mods32:mods/mods32:titleInfo[mods32:title and not (@type)]",
-    },
-    'title_alt': {
-        'xpath': "//mods32:mods/mods32:titleInfo[mods32:title and (@type='alternative')]",
-        'array': True
-    },
-    'author': {
-        'xpath': "//mods32:mods/mods32:name[@type='personal' and mods32:role/mods32:roleTerm[text()='creator']]",
-        'post_xpath': "//*[local-name()='namePart']"
-    },
-    'corpauthor': {
-        'xpath': "//mods32:mods/mods32:name[@type='corporate' and (mods32:role/mods32:roleTerm[text()='creator'] or mods32:role/mods32:roleTerm[text()='aut'] or mods32:role/mods32:roleTerm[text()='cre'])]",
-        'post_xpath': "//*[local-name()='namePart']"
-    },
-    'author_other': {
-        'xpath':
-            "//mods32:mods/mods32:name[@type='personal' and not(mods32:role/mods32:roleTerm[text()='creator'])]",
-        'post_xpath': "//*[local-name()='namePart' and (not(@*[local-name()='type']) or not(@*[local-name()='type']='date'))] ",
-        'array': True
-    },
-    'abstract': {
-        'xpath': "//mods32:mods/mods32:abstract",
-    },
-    'contents': {
-        'xpath': "//mods32:mods/mods32:tableOfContents",
-    },
-    'physical_description': {
-        'xpath': "//mods32:mods/mods32:physicalDescription/mods32:extent",
-    },
-    'type_of_resource': {
-        'xpath': "//mods32:mods/mods32:typeOfResource",
-    },
-    'publisher': {
-        'xpath': "//mods32:mods/mods32:originInfo/mods32:publisher",
-    },
-    'publisher_location': {
-        'xpath': "//mods32:mods/mods32:originInfo/mods32:place/mods32:placeTerm[@type='text']",
-    },
-    'record_year': {
-        'xpath': "//mods32:mods/mods32:originInfo/mods32:dateIssued",
-    },
-    'sort_year': {
-        'xpath': "//mods32:mods/mods32:originInfo/mods32:dateIssued[@encoding='marc']",
-        'validation': '^\d+$',
-    },
-    'isbn': {
-        'xpath': "//mods32:mods/mods32:identifier[@type='isbn']",
-        'array': True
-    },
-    'issn': {
-        'xpath': "//mods32:mods/mods32:identifier[@type='issn']",
-        'array': True
-    },
-    'upc': {
-        'xpath': "//mods32:mods/mods32:identifier[@type='upc']",
-        'array': True
-    },
-    'series': {
-        'xpath': "//mods32:mods/mods32:relatedItem[@type='series']/mods32:titleInfo/mods32:title",
-        'array': True
-    },
-    'links': {
-        'xpath': "//mods32:mods/mods32:identifier[@type='uri']",
-        'array': True
+index_def = {
+  # Some index fields are hard-coded.
+  # Remaining index fields are added dynamically below
+  'source': {
+    'type': 'integer',
+    'index': 'not_analyzed',
+    'include_in_all': 'false',
+  },
+  'create_date': {
+    'type': 'date',
+    'index': 'not_analyzed',
+    'include_in_all': 'false',
+  },
+  'edit_date': {
+    'type': 'date',
+    'index': 'not_analyzed',
+    'include_in_all': 'false',
+  },
+  'holdings': {
+    'type': 'nested',
+    'properties': {
+      'status': {
+        'type': 'integer',
+        'index': 'not_analyzed',
+        'include_in_all': 'false',
+      },
+      'circ_lib': {
+        'type': 'integer',
+        'index': 'not_analyzed',
+        'include_in_all': 'false',
+      },
+      'location': {
+        'type': 'integer',
+        'index': 'not_analyzed',
+        'include_in_all': 'false',
+      },
+      'circulate': {
+        'type': 'boolean',
+        'index': 'not_analyzed',
+        'include_in_all': 'false',
+      },
+      'opac_visible': {
+        'type': 'boolean',
+        'index': 'not_analyzed',
+        'include_in_all': 'false',
+      }
     }
+  }
 }
 
-xslt = ET.parse(xsl_filename)
-transform = ET.XSLT(xslt)
+def get_db_conn():
+    global db_conn
 
-def insert_to_elasticsearch(output):
-    indexresult = es.index(index=es_index, doc_type='record', id=output['id'], body=output)
-    logging.debug(repr(indexresult))
+    if db_conn is None:
 
-def get_titles_misc(rec_id, mods):
-    # We'd like to return two things:
-    # title_short
-    # title_nonfiling
-    titles = mods.xpath(
-        "//mods32:mods/mods32:titleInfo[mods32:title and not (@type)]",
-        namespaces=namespace_dict)
-    if (len(titles)):
-        first_title = titles[0]
-    else:
-        logging.warn('No title matches for record %s' % (rec_id,))
-        return ('', '')
-    non_sort_match = first_title.xpath(
-        ".//*[local-name()='nonSort']",
-        namespaces=namespace_dict)
-    title_match = first_title.xpath(
-        ".//*[local-name()='title']",
-        namespaces=namespace_dict)
-    if (len(non_sort_match) and non_sort_match[0].text):
-        title_short = non_sort_match[0].text
-    else:
-        title_short = ''
-    if (len(title_match) and title_match[0].text):
-        title_short = title_short + title_match[0].text
-        title_nonfiling = title_match[0].text
-    else:
-        logging.warn('No value found for title_nonfiling for record %s' % (rec_id,))
-        title_nonfiling = ''
-    return (title_short, title_nonfiling)
-
-
-def get_subjects(mods):
-    subjects = []
-    matches = mods.xpath(
-        "//mods32:mods/mods32:subject[mods32:geographic or mods32:name "
-        "or mods32:temporal or mods32:topic]",
-        namespaces=namespace_dict)
-    for match in matches:
-        subjects.append(' '.join(match.itertext()))
-    return subjects
-
-
-def get_genres(mods):
-    genres = []
-    matches = mods.xpath("//mods32:mods/mods32:genre", namespaces=namespace_dict)
-    for match in matches:
-        genres.append(' '.join(match.itertext()))
-    return genres
-
-
-def get_901c(record):
-    id = None
-
-    match_901 = record.xpath("marc:datafield[@tag='901']/marc:subfield[@code='c']", namespaces=namespace_dict)
-
-    if len(match_901):
-        id = match_901[0].text
-    else:
-        logging.error('RECORD HAS NO 901: %s' % record)
-
-    logging.debug('Found record id %s' % id)
-
-    return id
-
-def get_marc_call_number(record):
-    marc_cn = None
-
-    match = record.xpath("marc:datafield[@tag='092']/marc:subfield[@code='a']", 
-        namespaces=namespace_dict)
-
-    if len(match):
-        marc_cn = match[0].text
-    else:
-        match = record.xpath(
-            "marc:datafield[@tag='092']/marc:subfield[@code='b']", 
-            namespaces=namespace_dict
+        dbcfg = config['evergreen_db']
+        db_conn = psycopg2.connect(
+            dbname=dbcfg['dbname'], 
+            user=dbcfg['user'],
+            password=dbcfg['password'], 
+            host=dbcfg['host'],
+            port=dbcfg['port']
         )
 
-        if len(match):
-            marc_cn = match[0].text
-        else:
-            match = record.xpath(
-                "marc:datafield[@tag='099']/marc:subfield[@code='a']", 
-                namespaces=namespace_dict
-            )
+    return db_conn
 
-            if len(match):
-                marc_cn = match[0].text
+def insert_to_elasticsearch(output):
+    indexresult = es.index(
+        index = index_name, 
+        doc_type = 'record', 
+        id = output['id'], 
+        body = output
+    )
+    logging.debug(repr(indexresult))
 
-    logging.debug('Found record MARC call number %s' % marc_cn)
+# Extract the search fields and XSL transforms from the EG database
+def get_search_fields():
+    sfcur = get_db_conn().cursor()
 
-    return marc_cn
+    sfcur.execute('''
+        SELECT field_class, name, xpath, format
+        FROM config.metabib_field
+        WHERE search_field AND xpath IS NOT NULL
+    ''')
 
-def index_mods(rec_id, mods):
-    output = {}
+    for (field_class, name, xpath, format) in sfcur:
+        field_name = '%s_%s' % (field_class, name)
+        logging.debug('Inspecting search field %s', (field_name))
 
-    for index in list(indexes.keys()):
-        logging.debug('Indexing %s' % index)
-        xpath = indexes[index]['xpath']
-        post_xpath = None
-        if 'post_xpath' in indexes[index]:
-            post_xpath = indexes[index]['post_xpath']
-        r = mods.xpath(xpath, namespaces=namespace_dict)
-        result = None
-        if len(r):
-            if post_xpath:
-                r = r[0].xpath(post_xpath)
-            if 'array' in indexes[index] and indexes[index]['array']:
-                result = []
-                for element in r:
-                    result.append(' '.join(element.itertext()))
-            else:
-                result = ' '.join(r[0].itertext())
-        if result:
-            if 'validation' in indexes[index]:
-                pattern = indexes[index]['validation']
-                if re.search(pattern, result):
-                    output[index] = result
-            else:
-                output[index] = result
-        else:
-            output[index] = ''
+        search_fields[field_name] = {
+            'format': format,
+            'xpath': xpath
+        }
 
-    if (output['author'] == ''):
-        logging.debug('Setting corpauthor to author')
-        output['author'] = output['corpauthor']
+        if format not in xsl_docs:
+            logging.debug('Adding XSLT for %s', format)
+            xslcur = get_db_conn().cursor()
+            xslcur.execute('''
+                SELECT namespace_uri, prefix, xslt
+                FROM config.xml_transform 
+                WHERE name = '%s' ''' % (format))
 
-    (output['title_short'], output['title_nonfiling']) = get_titles_misc(rec_id, mods)
-    output['subjects'] = get_subjects(mods)
-    output['genres'] = get_genres(mods)
+            # will be exactly one matching row
+            xsl_info = xslcur.fetchall()[0]
 
-    return output
+            xsl_docs[format] = {
+                'namespace_uri': xsl_info[0],
+                'prefix': xsl_info[1],
+                'xslt': xsl_info[2]
+            }
+
+            xml_namespaces[xsl_info[1]] = xsl_info[0]
 
 
-def index_holdings(conn, record_ids):
+def add_search_field_indexes():
+
+    for field_name in search_fields:
+
+        # Note having folded, sort, and raw versions of every
+        # indexed field is probably overkill
+
+        index_def[field_name] = {
+          'type': 'string',
+          'analyzer': 'english',
+          # there's a separate keyword index for "all"
+          'include_in_all': 'false',
+          'fields': {
+            "folded": {
+              "type": "string",
+              "analyzer": "folding",
+            },
+            'sort': {
+                'type': 'string',
+                'analyzer': 'ducet_sort',
+            },
+            "raw": {
+              "type": "string",
+              "index": "not_analyzed",
+            }
+          }
+        }
+
+
+def create_index():
+    # TODO: move some of this into the config file
+    es.indices.create(
+        index = index_name,
+        body = {
+          'settings': {
+            'number_of_shards': 5,
+            'number_of_replicas': 1,
+            'analysis': {
+              'analyzer': {
+                'ducet_sort': {
+                  'tokenizer': 'keyword',
+                },
+                'folding': {
+                  'filter': ['lowercase', 'asciifolding'],
+                  'tokenizer': 'standard',
+                },
+              },
+            },
+          },
+        }
+    )
+
+    # Index created, now defined the index fields
+
+    # TODO: add some marc fields and subfields for MARC-based searches?
+
+    add_search_field_indexes()
+
+    es.indices.put_mapping(
+        index = index_name,
+        doc_type = 'record',
+        body = {'record': {'properties': index_def}}
+    )
+
+
+def index_holdings(record_ids):
     holdings_dict = {}
     holdings_count = 0
 
-    cur = conn.cursor()
+    cur = get_db_conn().cursor()
 
     cur.execute('''
 SELECT 
@@ -309,81 +256,63 @@ GROUP BY 2, 3, 4, 5, 6, 7
     return holdings_dict
 
 
-def get_hold_counts(conn, record_ids):
-    holdcount_dict = {}
+def extract_search_field_values(marc_xml_doc, output):
 
-    cur = conn.cursor()
+    xform_docs = {}
 
-    cur.execute('''
-SELECT ahr.target, COUNT(*)
-FROM action.hold_request ahr
-WHERE ahr.hold_type = 'T'
-AND ahr.fulfillment_time IS NULL
-AND ahr.cancel_time IS NULL
-AND ahr.target = ANY(%(record_ids)s::BIGINT[])
-AND ahr.pickup_lib IN (SELECT id FROM actor.org_unit_descendants(%(org_root)s))
-GROUP BY ahr.target
-''', {'record_ids': record_ids, 'org_root': org_root})
+    for field_name, search_def in search_fields.iteritems():
 
-    for (record, hold_count) in cur:
-        logging.debug([record, hold_count])
-        holdcount_dict[record] = hold_count
-    logging.info('Fetched hold counts for %s records.' % (len(record_ids),))
-    return holdcount_dict
+        xsl_name = search_def['format']
+        xpath_str = search_def['xpath']
 
+        #logging.debug('--- %s = %s => %s' % (field_name, xsl_name, xpath_str))
 
-def get_db_conn():
-    dbcfg = config['evergreen_db']
-    conn = psycopg2.connect(dbname=dbcfg['dbname'], user=dbcfg['user'],
-                            password=dbcfg['password'], host=dbcfg['host'],
-                            port=dbcfg['port'])
-    return conn
+        xform_doc = None
+        if xsl_name == 'marcxml': 
+            # no transform required for 'marcxml'
+            xform_doc = marc_xml_doc
 
+        else:
 
-def load_full_state():
-    conf = configparser.ConfigParser()
-    conf.read('index-state.ini')
-    return {
-        'start_date': conf.get('full', 'start_date', fallback=None),
-        'in_progress': conf.getboolean('full', 'in_progress', fallback=False),
-        'last_edit_date': conf.get('full', 'last_edit_date', fallback=None),
-        'last_id': conf.getint('full', 'last_id', fallback=0)
-    }
+            if xsl_name not in xform_docs:
+                logging.debug('Transforming bib to %s', (xsl_name))
 
+                if 'transform' not in xsl_docs[xsl_name]:
+                    logging.debug('Creating XSL transform for %s' % (xsl_name))
+                    xsl_file_ish = BytesIO(xsl_docs[xsl_name]['xslt'])
+                    xslt = ET.parse(xsl_file_ish)
+                    xsl_docs[xsl_name]['transform'] = ET.XSLT(xslt)
+        
+                xform_docs[xsl_name] = xsl_docs[xsl_name]['transform'](marc_xml_doc)
 
-def load_incremental_state():
-    conf = configparser.ConfigParser()
-    conf.read('index-state.ini')
-    return {
-        'last_edit_date': conf.get('incremental', 'last_edit_date',
-                                   fallback=None),
-        'last_id': conf.getint('incremental', 'last_id', fallback=0),
-    }
+            xform_doc = xform_docs[xsl_name]
+
+        xpres = xform_doc.xpath(xpath_str, namespaces=xml_namespaces)
+
+        # NOTE: multiple values are squashed into a single string
+        field_val = None
+        for elm in xpres:
+            new_txt = ' '.join(elm.itertext())
+
+            if field_val is None:
+                field_val = new_txt
+            else:
+                field_val = field_val + ' ' + new_txt
+
+        logging.debug('Extracted %s = %s' % (field_name, field_val))
+
+        output[field_name] = field_val
 
 
-def set_state(section, key, value):
-    conf = configparser.ConfigParser()
-    conf.read('index-state.ini')
-    if (section not in conf):
-        conf.add_section(section)
-    if (value is None):
-        conf.remove_option(section, key)
-    else:
-        conf.set(section, key, str(value))
-    with open('index-state.ini', 'w') as f:
-        conf.write(f)
-
-
-def full_index_page(egconn, state):
-    egcur = egconn.cursor()
+def full_index_page(state):
+    bib_cur = get_db_conn().cursor()
     index_count = 0
     last_edit_date = state['last_edit_date']
     last_id = state['last_id']
 
-    egcur.execute('''
-SELECT bre.id, bre.marc, bre.create_date, bre.edit_date, cbs.source
+    bib_cur.execute('''
+SELECT bre.id, bre.marc, bre.create_date, bre.edit_date, bre.source
 FROM biblio.record_entry bre
-LEFT JOIN config.bib_source cbs ON bre.source = cbs.id
 WHERE (
     NOT bre.deleted
     AND bre.active
@@ -398,333 +327,123 @@ WHERE (
 )
 ORDER BY bre.edit_date ASC, bre.id ASC
 LIMIT 1000
-''', {'last_edit_date': last_edit_date, 'last_id': last_id,
-      'org_root': org_root})
+''', {'last_edit_date': last_edit_date, 'last_id': last_id})
 
     # Clear last_edit_date, last_id
     state['last_edit_date'] = None
     state['last_id'] = None
 
-    results = egcur.fetchall()
+    results = bib_cur.fetchall()
 
     # Get just the record IDs
     record_ids = []
     for result in results:
         record_ids.append(result[0])
 
-    holdings = index_holdings(egconn, record_ids)
+    logging.info("Fetched %d records" % (len(record_ids)))
 
-    hold_counts = get_hold_counts(egconn, record_ids)
+    holdings = index_holdings(record_ids)
 
     for (bre_id, marc, create_date, edit_date, source) in results:
         index_count += 1
-        record = ET.fromstring(marc)
-        mods = transform(record)
-        output = index_mods(bre_id, mods)
+
+        marc_xml_doc = ET.fromstring(marc)
+
+        output = {}
         output['id'] = bre_id
-        output['marc_cn'] = get_marc_call_number(record)
-
-        if output['links']:
-            for link in output['links']:
-                if re.match('.*hoopladigital\.com.*', link):
-                    source = 'Hoopla'
-                elif re.match('.*safaribooksonline\.com.*', link):
-                    source = 'Safari'
-                elif re.match('.*\.lib\.overdrive\.com.*', link):
-                    source = 'OverDrive'
-                elif re.match('.*avod\.films\.com.*', link):
-                    source = 'AVOD'
-
-        if source in ['Safari', 'OverDrive', 'AVOD', 'Hoopla']:
-            output['electronic'] = True
-        else:
-            output['electronic'] = False
-
         output['source'] = source
         output['create_date'] = create_date
         output['edit_date'] = edit_date
+        extract_search_field_values(marc_xml_doc, output)
+
         if bre_id in holdings:
             output['holdings'] = holdings[bre_id]
         else:
             output['holdings'] = []
-        if bre_id in hold_counts:
-            output['hold_count'] = hold_counts[bre_id]
-        else:
-            output['hold_count'] = 0
+
         logging.debug(repr(output))
         insert_to_elasticsearch(output)
+
         # Update state vars -- the most recent value of these will be
         # written to the state file after the current loop completes
         state['last_edit_date'] = edit_date
         state['last_id'] = bre_id
+
     return index_count, state
 
+def full_index():
 
-def full_index(egconn):
-    state = load_full_state()
-    if state['in_progress'] is False:
-        logging.info('STARTING NEW full indexing run')
-        egcur = egconn.cursor()
-        egcur.execute("SELECT NOW();")
-        full_start_date = egcur.fetchone()[0]
-        logging.info("Full index start time is %s" % (full_start_date,))
-        set_state('full', 'start_date', full_start_date)
-        set_state('full', 'in_progress', True)
-        set_state('full', 'last_edit_date', None)
-        set_state('full', 'last_id', None)
-    else:
-        logging.info('RESUMING EXISTING full indexing run')
-    logging.info("Retrieved state: " + repr(state))
     # Index a "page" of records at a time
     # loop while number of records indexed != 0
     indexed_count = None
+    state = {
+        'last_edit_date': None,
+        'last_id': 0
+    }
+
     while (indexed_count != 0):
         start_time = time.time()
-        (indexed_count, state) = full_index_page(egconn, state)
+        (indexed_count, state) = full_index_page(state)
         time_taken = time.time() - start_time
+
         if (time_taken > 0):
             time_recs_sec = indexed_count / time_taken
         else:
             time_recs_sec = 0
+
         logging.info('indexed %s records in %.0fs (~%.3f rec/s) '
                      'ending with date %s id %s'
                      % (indexed_count, time_taken, time_recs_sec,
                         state['last_edit_date'], state['last_id']))
-        # Write state vars to state file -- supports resuming a full
-        # index run
-        set_state('full', 'last_edit_date', state['last_edit_date'])
-        set_state('full', 'last_id', state['last_id'])
-        # Rollback transaction
-        egconn.rollback()
-    # if number of records is zero, we are no longer "in progress"
-    set_state('full', 'in_progress', None)
-    set_state('full', 'last_edit_date', None)
-    set_state('full', 'last_id', None)
-    newstate = load_full_state()
-    set_state('incremental', 'last_edit_date', newstate['start_date'])
-    set_state('incremental', 'last_id', 0)
-    logging.info("DONE!")
 
 
-def index_single_record(egconn, record_id):
-    egcur = egconn.cursor()
-    logging.info("Will index single record: %s" % (record_id,))
-    egcur.execute("""
-SELECT bre.id, bre.marc, bre.create_date, bre.edit_date, cbs.source
-FROM biblio.record_entry bre
-LEFT JOIN config.bib_source cbs ON bre.source = cbs.id
-WHERE bre.id = %s""", (record_id,))
-    results = egcur.fetchall()
 
-    # Get just the record IDs
-    record_ids = []
-    for result in results:
-        record_ids.append(result[0])
+# -- start execution here ------------------------------------------------
 
-    holdings = index_holdings(egconn, record_ids)
+logging.config.fileConfig('index-config.ini')
 
-    hold_counts = get_hold_counts(egconn, record_ids)
+parser = argparse.ArgumentParser()
+parser.add_argument('--recreate-index', action='store_true')
+parser.add_argument('--create-index', action='store_true')
+parser.add_argument('--drop-index', action='store_true')
+parser.add_argument('--full-index', action='store_true')
+parser.add_argument('--incremental-index', action='store_true')
+cl_args = parser.parse_args()
 
-    for (bre_id, marc, create_date, edit_date, source) in results:
-        record = ET.fromstring(marc)
-        mods = transform(record)
-        output = index_mods(bre_id, mods)
-        output['id'] = bre_id
+config = configparser.ConfigParser()
+config.read('index-config.ini')
 
-        if output['links']:
-            for link in output['links']:
-                if re.match('.*hoopladigital\.com.*', link):
-                    source = 'Hoopla'
-                elif re.match('.*safaribooksonline\.com.*', link):
-                    source = 'Safari'
-                elif re.match('.*\.lib\.overdrive\.com.*', link):
-                    source = 'OverDrive'
-                elif re.match('.*avod\.films\.com.*', link):
-                    source = 'AVOD'
+es = Elasticsearch([config['elasticsearch']['url']])
 
-        if source in ['Safari', 'OverDrive', 'AVOD', 'Hoopla']:
-            output['electronic'] = True
-        else:
-            output['electronic'] = False
+index_name = config['elasticsearch']['index']
 
-        output['source'] = source
-        output['create_date'] = create_date
-        output['edit_date'] = edit_date
-        if bre_id in holdings:
-            output['holdings'] = holdings[bre_id]
-        else:
-            output['holdings'] = []
-        if bre_id in hold_counts:
-            output['hold_count'] = hold_counts[bre_id]
-        else:
-            output['hold_count'] = 0
-        logging.debug(repr(output))
-        insert_to_elasticsearch(output)
+if (es.ping()):
+    logging.info("Connection to elasticsearch OK")
 
+# Pretty much always need these, so pre-load them
+get_search_fields()
 
-def incremental_index_page(egconn, state):
-    egcur = egconn.cursor()
-    index_count = 0
-    last_edit_date = state['last_edit_date']
-    last_id = state['last_id']
+if (cl_args.recreate_index or cl_args.drop_index):
+    if es.indices.exists(index_name):
+        logging.info('Dropping index %s', (index_name))
+        es.indices.delete(index_name)
+    elif cl_args.drop_index:
+        logging.info(
+            "Index %s does not exist -- nothing to drop" % (index_name))
 
-    egcur.execute('''
-SELECT bre.id, bre.marc, bre.create_date, bre.edit_date, cbs.source,
-    GREATEST(MAX(bre.edit_date), MAX(acn.edit_date), MAX(acp.edit_date)) AS
-    last_edit_date
-FROM biblio.record_entry bre
-LEFT JOIN config.bib_source cbs ON bre.source = cbs.id
-LEFT JOIN asset.call_number acn ON bre.id = acn.record
-LEFT JOIN asset.copy acp ON acp.call_number = acn.id
-WHERE (
-    acp.circ_lib IN (SELECT id FROM actor.org_unit_descendants(%(org_root)s))
-    OR acn.owning_lib IN (
-        SELECT id FROM actor.org_unit_descendants(%(org_root)s)
-    )
-)
-AND (
-    (
-        (
-            bre.edit_date >= %(last_edit_date)s
-            OR acn.edit_date >= %(last_edit_date)s
-            OR acp.edit_date >= %(last_edit_date)s
-        )
-        AND bre.id > %(last_id)s
-    )
-    OR (
-        bre.edit_date > %(last_edit_date)s
-        OR acn.edit_date > %(last_edit_date)s
-        OR acp.edit_date > %(last_edit_date)s
-    )
-)
-GROUP BY bre.id, bre.marc, bre.create_date, bre.edit_date, cbs.source
-ORDER BY GREATEST(
-    MAX(bre.edit_date), MAX(acn.edit_date), MAX(acp.edit_date)
-) ASC, bre.id ASC
-LIMIT 1000
-''', {'last_edit_date': last_edit_date, 'last_id': last_id,
-      'org_root': org_root})
+if (cl_args.recreate_index or cl_args.create_index):
 
-    results = egcur.fetchall()
-
-    # Get just the record IDs
-    record_ids = []
-    for result in results:
-        record_ids.append(result[0])
-
-    holdings = index_holdings(egconn, record_ids)
-
-    hold_counts = get_hold_counts(egconn, record_ids)
-
-    for (bre_id, marc, create_date, edit_date, source,
-         last_edit_date) in results:
-        logging.info("bib %s last_edit_date %s" % (bre_id, last_edit_date))
-        index_count += 1
-        record = ET.fromstring(marc)
-        mods = transform(record)
-        output = index_mods(bre_id, mods)
-        output['id'] = bre_id
-
-        if output['links']:
-            for link in output['links']:
-                if re.match('.*hoopladigital\.com.*', link):
-                    source = 'Hoopla'
-                elif re.match('.*safaribooksonline\.com.*', link):
-                    source = 'Safari'
-                elif re.match('.*\.lib\.overdrive\.com.*', link):
-                    source = 'OverDrive'
-                elif re.match('.*avod\.films\.com.*', link):
-                    source = 'AVOD'
-
-        if source in ['Safari', 'OverDrive', 'AVOD', 'Hoopla']:
-            output['electronic'] = True
-        else:
-            output['electronic'] = False
-
-        output['source'] = source
-        output['create_date'] = create_date
-        output['edit_date'] = edit_date
-        if bre_id in holdings:
-            output['holdings'] = holdings[bre_id]
-        else:
-            output['holdings'] = []
-        if bre_id in hold_counts:
-            output['hold_count'] = hold_counts[bre_id]
-        else:
-            output['hold_count'] = 0
-        logging.debug(repr(output))
-        insert_to_elasticsearch(output)
-        # Update state vars -- the most recent value of these will be
-        # written to the state file after the current loop completes
-        state['last_edit_date'] = last_edit_date
-        state['last_id'] = bre_id
-    return index_count, state
-
-
-def incremental_index(egconn):
-    # For incremental, we must have:
-    #  - a last_edit_date
-    #  - a last_id
-    # If this is our first incremental, the last_edit_date
-    # will be the start_date of the full index run
-    # This way, we will pick up any changes that happened during the full
-    # index run
-    # Our full index must not be in progress
-    full_state = load_full_state()
-    if (full_state['in_progress']):
-        logging.error("Cannot perform incremental index while full index is "
-                      "in a state of in_progress")
+    if (es.indices.exists(index_name) and cl_args.create_index):
+        logging.error("Index already exists: %s" % (index_name))
+        logging.error(
+            "Use --drop-index or --recreate-index to first drop the index")
         sys.exit(1)
 
-    if (docs_count == 0):
-        logging.error("Index is empty -- aborting incremental update.")
-        sys.exit(1)
+    logging.info("Creating index %s" % (index_name))
+    create_index()
 
-    state = load_incremental_state()
-    logging.info("Loaded state " + repr(state))
-    # Index a "page" of records at a time
-    # loop while number of records indexed != 0
-    indexed_count = None
-    while (indexed_count is None) or (indexed_count == 1000):
-        (indexed_count, state) = incremental_index_page(egconn, state)
-        logging.info('indexed %s records ending with date %s id %s'
-                     % (indexed_count, state['last_edit_date'],
-                        state['last_id']))
-        # Write state vars to state file -- supports resuming an
-        # incremental index run
-        set_state('incremental', 'last_edit_date', state['last_edit_date'])
-        set_state('incremental', 'last_id', state['last_id'])
-        # Rollback transaction
-        egconn.rollback()
-    # if we get a "page" that contains fewer records than the LIMIT count,
-    # we are done for this run
-    logging.info("DONE with incremental!")
+if cl_args.full_index:
+    full_index()
 
 
-if (xml_filename):
-    # Index records from XML file
-    collection_dom = ET.parse(xml_filename)
 
-    collection = collection_dom.getroot()
-
-    for record in collection:
-        rec_id = get_901c(record)
-        mods = transform(record)
-        output = index_mods(rec_id, mods)
-        output['id'] = rec_id
-        output['create_date'] = None
-        output['edit_date'] = None
-        insert_to_elasticsearch(output)
-else:
-    # Index records from database
-    egconn = get_db_conn()
-    if (args.id):
-        logging.info(repr(args.id))
-        index_single_record(egconn, args.id)
-    elif (args.full):
-        full_index(egconn)
-    elif (args.incremental):
-        incremental_index(egconn)
-    else:
-        print("Must specify one of incremental or full")
-        sys.exit(1)

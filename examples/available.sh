@@ -11,7 +11,7 @@ curl -XPOST "$ES_URL/$ES_INDEX/_search?pretty=true" -d '
     "bool": {
       "must": {
         "match": {
-          "title": "piano"
+          "title_maintitle": "piano"
         }
       },
       "filter": {
