@@ -11,7 +11,7 @@ Piping the output through jq can add color and even more
 pretty-printing, as well as allow for filtering.
 
     # No filtering, just pretty-print and auto-color:
-    ./available.sh | jq .
+    ./query_string.sh | jq .
 
     # No filtering, pipe through less and preserve color:
-    ./available.sh | jq -C . | less -R
+    ./query_string.sh | jq -C . | less -R

@@ -7,7 +7,6 @@
 # TODO 
 # * finer grained index configs per field
 # * index facet fields for 'aggs'
-# * 'analyzer': 'english' ?
 
 import configparser
 import logging
@@ -23,6 +22,10 @@ from datetime import date
 from elasticsearch import Elasticsearch
 
 db_conn = None
+
+# TODO: it's possible to index a given field via multiple
+# language analyzers.
+lang_analyzer = 'english'
 
 # cache of XSL transform docs
 xsl_docs = {}
@@ -107,94 +110,113 @@ def insert_to_elasticsearch(output):
     )
     logging.debug(repr(indexresult))
 
+def add_xsl_info(format_name):
+    if format in xsl_docs:
+        return
+
+    logging.debug('Adding XSLT for %s', format_name)
+
+    xslcur = get_db_conn().cursor()
+    xslcur.execute('''
+        SELECT namespace_uri, prefix, xslt
+        FROM config.xml_transform 
+        WHERE name = '%s' ''' % (format_name))
+
+    xsl_info = xslcur.fetchall()[0] # one match
+
+    ns_uri = xsl_info[0]
+    prefix = xsl_info[1]
+    xslt   = xsl_info[2]
+
+    xml_namespaces[prefix] = ns_uri
+    xsl_docs[format_name] = {'xslt': xslt}
+
 # Extract the search fields and XSL transforms from the EG database
-def get_search_fields():
+def get_eg_index_fields():
     sfcur = get_db_conn().cursor()
 
     sfcur.execute('''
-        SELECT field_class, name, xpath, format
+        SELECT field_class, name, xpath, format, 
+            weight, search_field, facet_field
         FROM config.metabib_field
-        WHERE search_field AND xpath IS NOT NULL
+        WHERE (search_field OR facet_field) AND xpath IS NOT NULL
     ''')
 
-    for (field_class, name, xpath, format) in sfcur:
+    for (field_class, name, xpath, 
+            format, weight, search_field, facet_field) in sfcur:
+
         field_name = '%s_%s' % (field_class, name)
-        logging.debug('Inspecting search field %s', (field_name))
+        logging.debug('Inspecting field %s', (field_name))
 
         search_fields[field_name] = {
+            'field_class': field_class,
+            'search_field': search_field,
+            'facet_field': facet_field,
+            'name': name,
             'format': format,
-            'xpath': xpath
+            'xpath': xpath,
+            'weight': weight
         }
 
-        if format not in xsl_docs:
-            logging.debug('Adding XSLT for %s', format)
-            xslcur = get_db_conn().cursor()
-            xslcur.execute('''
-                SELECT namespace_uri, prefix, xslt
-                FROM config.xml_transform 
-                WHERE name = '%s' ''' % (format))
+        add_xsl_info(format)
 
-            # will be exactly one matching row
-            xsl_info = xslcur.fetchall()[0]
+def add_eg_field_indexes():
 
-            xsl_docs[format] = {
-                'namespace_uri': xsl_info[0],
-                'prefix': xsl_info[1],
-                'xslt': xsl_info[2]
+    for field_name, search_def in search_fields.iteritems():
+
+        field_class = search_def['field_class']
+
+        search_field_index = {
+            "type": "text",
+            "include_in_all": "false",
+            "analyzer": lang_analyzer,
+            "fields": {
+                "folded": {
+                    "type": "text",
+                    "analyzer": "folding",
+                }
             }
-
-            xml_namespaces[xsl_info[1]] = xsl_info[0]
-
-
-def add_search_field_indexes():
-
-    for field_name in search_fields:
-
-        # Note having folded, sort, and raw versions of every
-        # indexed field is probably overkill
-
-        index_def[field_name] = {
-          'type': 'string',
-          'analyzer': 'english',
-          # there's a separate keyword index for "all"
-          'include_in_all': 'false',
-          'fields': {
-            "folded": {
-              "type": "string",
-              "analyzer": "folding",
-            },
-            'sort': {
-                'type': 'string',
-                'analyzer': 'ducet_sort',
-            },
-            "raw": {
-              "type": "string",
-              "index": "not_analyzed",
-            }
-          }
         }
 
+        raw_field_index = {
+            "type": "keyword",
+            "include_in_all": "false",
+        }
+
+        # Create field to contain all data for each field_class, 
+        # so a title search, for example, searches title_maintitle,
+        # title_proper, etc.
+        if field_class not in index_def:
+            index_def[field_class] = search_field_index
+            index_def[field_class + '_raw'] = raw_field_index
+
+        # Keep a _raw index for both search and facet fields since
+        # it's used for both aggregation and sorting
+        raw_field_index['copy_to'] = field_class + '_raw'
+        index_def[field_name + '_raw'] = raw_field_index
+
+        # However, only search fields get analyzed text indexes
+        if search_def['search_field']:
+            search_field_index['copy_to'] = field_class
+            index_def[field_name] = search_field_index
 
 def create_index():
     # TODO: move some of this into the config file
     es.indices.create(
         index = index_name,
         body = {
-          'settings': {
-            'number_of_shards': 5,
-            'number_of_replicas': 1,
-            'analysis': {
-              'analyzer': {
-                'ducet_sort': {
-                  'tokenizer': 'keyword',
+            'settings': {
+                'number_of_shards': 5,
+                'number_of_replicas': 1,
+                'analysis': {
+                    'analyzer': {
+                        'folding': {
+                            'filter': ['lowercase', 'asciifolding'],
+                            'tokenizer': 'standard',
+                        },
+                    },
                 },
-                'folding': {
-                  'filter': ['lowercase', 'asciifolding'],
-                  'tokenizer': 'standard',
-                },
-              },
             },
-          },
         }
     )
 
@@ -202,7 +224,7 @@ def create_index():
 
     # TODO: add some marc fields and subfields for MARC-based searches?
 
-    add_search_field_indexes()
+    add_eg_field_indexes()
 
     es.indices.put_mapping(
         index = index_name,
@@ -301,7 +323,10 @@ def extract_search_field_values(marc_xml_doc, output):
 
         logging.debug('Extracted %s = %s' % (field_name, field_val))
 
-        output[field_name] = field_val
+        if search_def['search_field']:
+            output[field_name] = field_val
+
+        output[field_name + '_raw'] = field_val
 
 
 def full_index_page(state):
@@ -421,7 +446,7 @@ if (es.ping()):
     logging.info("Connection to elasticsearch OK")
 
 # Pretty much always need these, so pre-load them
-get_search_fields()
+get_eg_index_fields()
 
 if (cl_args.recreate_index or cl_args.drop_index):
     if es.indices.exists(index_name):

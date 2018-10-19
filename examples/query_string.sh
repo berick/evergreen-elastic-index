@@ -2,31 +2,63 @@
 
 . load_config.sh
 
-# Records whose title matches 'piano' and which contain at least
-# one copy with (status 0 OR status 7) AND (cic_lib 4 OR circ_lib 5)
+# limit returned fields to just record ID
+# "_source": ["id"]
 
-curl -XPOST "$ES_URL/$ES_INDEX/_search?pretty=true" -d '
+
+curl -s -XPOST "$ES_URL/$ES_INDEX/_search?pretty=true" -d '
 {
   "sort": [
-    {"title_maintitle.raw": "asc" },
-    {"author_personal.raw": "asc" },
+    {"title_raw": "asc"},
+    {"author_raw": "asc"},
     "_score"
   ],
   "query": {
     "bool": {
       "must": {
         "query_string": {
-          "default_field": "keyword_keyword",
-          "query": "piano && author_personal:mozart"
+          "default_field": "keyword",
+          "query": "piano && author:mozart"
         }
       },
       "filter": {
         "nested": {
           "path": "holdings",
           "query": {
-            "terms": {"holdings.status": ["0", "7"]}
+            "bool": {
+              "must": [
+                {
+                  "bool": {
+                    "should": [
+                      {"term": {"holdings.status": "0"}},
+                      {"term": {"holdings.status": "7"}}
+                    ]
+                  }
+                },
+                {
+                  "bool": {
+                    "should": [
+                      {"term": {"holdings.circ_lib": "4"}},
+                      {"term": {"holdings.circ_lib": "5"}}
+                    ]
+                  }
+                }
+              ]
+            }
           }
         }
+      }
+    }
+  },
+  "aggs": {
+    "genres": {
+      "terms": {
+        "field": "identifier_genre_raw"
+      }
+    },
+    "subject_topic": {
+      "terms": {
+        "field": "subject_topic_raw"
       }
     }
   }
