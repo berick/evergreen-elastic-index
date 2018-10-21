@@ -9,8 +9,8 @@
 curl -s -XPOST "$ES_URL/$ES_INDEX/_search?pretty=true" -d '
 {
   "sort": [
-    {"title_raw": "asc"},
-    {"author_raw": "asc"},
+    {"title.raw": "asc"},
+    {"author.raw": "asc"},
     "_score"
   ],
   "query": {
@@ -53,12 +53,12 @@ curl -s -XPOST "$ES_URL/$ES_INDEX/_search?pretty=true" -d '
   "aggs": {
     "genres": {
       "terms": {
-        "field": "identifier_genre_raw"
+        "field": "identifier|genre.raw"
       }
     },
-    "subject_topic": {
+    "subject|topic": {
       "terms": {
-        "field": "subject_topic_raw"
+        "field": "subject|topic.raw"
       }
     }
   }

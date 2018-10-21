@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # -----------------------------------------------------------------------
 # Create elasticsearch indexes from Evergreen config.metabib_field 
@@ -14,6 +14,7 @@ import sys
 import argparse
 import psycopg2
 import time
+import copy
 
 import lxml.etree as ET
 from io import BytesIO
@@ -33,6 +34,8 @@ xml_namespaces = {}
 search_fields = {}
 
 index_name = None
+
+nonsort_field_classes = ['keyword', 'identifier']
 
 index_def = {
   # Some index fields are hard-coded.
@@ -144,7 +147,7 @@ def get_eg_index_fields():
     for (field_class, name, xpath, 
             format, weight, search_field, facet_field) in sfcur:
 
-        field_name = '%s_%s' % (field_class, name)
+        field_name = '%s|%s' % (field_class, name)
         logging.debug('Inspecting field %s', (field_name))
 
         search_fields[field_name] = {
@@ -161,11 +164,14 @@ def get_eg_index_fields():
 
 def add_eg_field_indexes():
 
-    for field_name, search_def in search_fields.iteritems():
+    for field_name, search_def in search_fields.items():
 
         field_class = search_def['field_class']
 
-        search_field_index = {
+        # Assume group fields (title, author, etc.) apply all indexing
+        # stategies (lang, folding, raw).  Remove 'raw' sub-index
+        # below for groups/fields that don't need them.
+        field_index = {
             "type": "text",
             "include_in_all": "false",
             "analyzer": lang_analyzer,
@@ -173,31 +179,37 @@ def add_eg_field_indexes():
                 "folded": {
                     "type": "text",
                     "analyzer": "folding",
+                },
+                "raw": {
+                    "type": "keyword",
+                    "include_in_all": "false",
                 }
             }
         }
 
-        raw_field_index = {
-            "type": "keyword",
-            "include_in_all": "false",
-        }
-
-        # Create field to contain all data for each field_class, 
-        # so a title search, for example, searches title_maintitle,
-        # title_proper, etc.
+        # Create the field_class-level grouped field.  Some grouped
+        # field_class'es are never used for aggregation and sorting, 
+        # so remove the "raw" multi-field.
         if field_class not in index_def:
-            index_def[field_class] = search_field_index
-            index_def[field_class + '_raw'] = raw_field_index
+            field_class_idx = copy.deepcopy(field_index)
+            if field_class in nonsort_field_classes:
+                del field_class_idx['fields']['raw']
+            index_def[field_class] = field_class_idx
 
-        # Keep a _raw index for both search and facet fields since
-        # it's used for both aggregation and sorting
-        raw_field_index['copy_to'] = field_class + '_raw'
-        index_def[field_name + '_raw'] = raw_field_index
+        # Create the field-specific index
 
-        # However, only search fields get analyzed text indexes
-        if search_def['search_field']:
-            search_field_index['copy_to'] = field_class
-            index_def[field_name] = search_field_index
+        # If this is neither a facet field nor a field in a sortable
+        # class, avoid creating the 'raw' sub-index
+        if (field_class in nonsort_field_classes and
+            not search_def['facet_field']):
+            del field_index['fields']['raw']
+
+        # Values for all field-speicific indexes are copied to 
+        # the field_class-level group index
+
+        field_index['copy_to'] = field_class
+
+        index_def[field_name] = field_index
 
 def create_index():
     # TODO: move some of this into the config file
@@ -277,11 +289,11 @@ GROUP BY 2, 3, 4, 5, 6, 7
     return holdings_dict
 
 
-def extract_search_field_values(marc_xml_doc, output):
+def extract_record_field_values(marc_xml_doc, output):
 
     xform_docs = {}
 
-    for field_name, search_def in search_fields.iteritems():
+    for field_name, search_def in search_fields.items():
 
         xsl_name = search_def['format']
         xpath_str = search_def['xpath']
@@ -300,7 +312,7 @@ def extract_search_field_values(marc_xml_doc, output):
 
                 if 'transform' not in xsl_docs[xsl_name]:
                     logging.debug('Creating XSL transform for %s' % (xsl_name))
-                    xsl_file_ish = BytesIO(xsl_docs[xsl_name]['xslt'])
+                    xsl_file_ish = BytesIO(bytearray(xsl_docs[xsl_name]['xslt'], 'utf-8'))
                     xslt = ET.parse(xsl_file_ish)
                     xsl_docs[xsl_name]['transform'] = ET.XSLT(xslt)
         
@@ -308,21 +320,15 @@ def extract_search_field_values(marc_xml_doc, output):
 
             xform_doc = xform_docs[xsl_name]
 
-        xpres = xform_doc.xpath(xpath_str, namespaces=xml_namespaces)
+        xpath_res = xform_doc.xpath(xpath_str, namespaces=xml_namespaces)
 
-        # NOTE: multiple values are squashed into a single string
-        #field_vals = []
-        #for elm in xpres:
-            #field_vals.append(' '.join(elm.itertext()))
+        field_vals = ' '.join(
+            [elm.text for elm in xpath_res if elm.text is not None]
+        )
 
-        field_vals = [' '.join(elm.itertext()) for elm in xpres]
+        logging.info('Extracted %s = %s' % (field_name, repr(field_vals)))
 
-        logging.debug('Extracted %s = %s' % (field_name, repr(field_vals)))
-
-        if search_def['search_field']:
-            output[field_name] = field_vals
-
-        output[field_name + '_raw'] = field_vals
+        output[field_name] = field_vals
 
 
 def full_index_page(state):
@@ -375,7 +381,7 @@ LIMIT 1000
         output['source'] = source
         output['create_date'] = create_date
         output['edit_date'] = edit_date
-        extract_search_field_values(marc_xml_doc, output)
+        extract_record_field_values(marc_xml_doc, output)
 
         if bre_id in holdings:
             output['holdings'] = holdings[bre_id]
