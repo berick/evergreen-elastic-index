@@ -113,10 +113,11 @@ def insert_to_elasticsearch(output):
     logging.debug(repr(indexresult))
 
 def add_xsl_info(format_name):
-    if format in xsl_docs:
+
+    if format_name in xsl_docs:
         return
 
-    logging.debug('Adding XSLT for %s', format_name)
+    logging.info('Adding XSLT for %s', format_name)
 
     xslcur = get_db_conn().cursor()
     xslcur.execute('''
@@ -131,24 +132,41 @@ def add_xsl_info(format_name):
     xslt   = xsl_info[2]
 
     xml_namespaces[prefix] = ns_uri
-    xsl_docs[format_name] = {'xslt': xslt}
+
+    xsl_docs[format_name] = {}
+
+    if format_name == 'marcxml':
+        # No transform needed for marcxml
+        return
+
+    xsl_file_ish = BytesIO(bytearray(xslt, 'utf-8'))
+    xsl_doc = ET.parse(xsl_file_ish)
+    xsl_docs[format_name] = {'transform': ET.XSLT(xsl_doc)}
 
 # Extract the search fields and XSL transforms from the EG database
 def get_eg_index_fields():
     sfcur = get_db_conn().cursor()
 
     sfcur.execute('''
-        SELECT field_class, name, xpath, format, 
+        SELECT field_class, name, xpath, facet_xpath, display_xpath, format, 
             weight, search_field, facet_field
         FROM config.metabib_field
         WHERE (search_field OR facet_field) AND xpath IS NOT NULL
     ''')
 
-    for (field_class, name, xpath, 
+    for (field_class, name, xpath, facet_xpath, display_xpath,
             format, weight, search_field, facet_field) in sfcur:
 
         field_name = '%s|%s' % (field_class, name)
         logging.debug('Inspecting field %s', (field_name))
+
+        # we need the "extra" xpath to get at the actual text values
+        # we want to index.  (typically, facet and display xpaths are
+        # the same, so just use whichever is available).
+        if facet_xpath:
+            xpath = xpath + facet_xpath
+        elif display_xpath:
+            xpath = xpath + display_xpath
 
         search_fields[field_name] = {
             'field_class': field_class,
@@ -288,45 +306,30 @@ GROUP BY 2, 3, 4, 5, 6, 7
     logging.info('Fetched %s holdings.' % (holdings_count,))
     return holdings_dict
 
-
 def extract_record_field_values(marc_xml_doc, output):
 
-    xform_docs = {}
+    xform_docs = {} # per-record transforms (mods, etc.)
 
     for field_name, search_def in search_fields.items():
 
         xsl_name = search_def['format']
         xpath_str = search_def['xpath']
+        xform_doc = marc_xml_doc
 
-        #logging.debug('--- %s = %s => %s' % (field_name, xsl_name, xpath_str))
-
-        xform_doc = None
-        if xsl_name == 'marcxml': 
-            # no transform required for 'marcxml'
-            xform_doc = marc_xml_doc
-
-        else:
+        if xsl_name != 'marcxml': # no transform needed for marcxml
 
             if xsl_name not in xform_docs:
+                # Transform the MARCXML to the new format
                 logging.debug('Transforming bib to %s', (xsl_name))
-
-                if 'transform' not in xsl_docs[xsl_name]:
-                    logging.debug('Creating XSL transform for %s' % (xsl_name))
-                    xsl_file_ish = BytesIO(bytearray(xsl_docs[xsl_name]['xslt'], 'utf-8'))
-                    xslt = ET.parse(xsl_file_ish)
-                    xsl_docs[xsl_name]['transform'] = ET.XSLT(xslt)
-        
                 xform_docs[xsl_name] = xsl_docs[xsl_name]['transform'](marc_xml_doc)
 
             xform_doc = xform_docs[xsl_name]
 
         xpath_res = xform_doc.xpath(xpath_str, namespaces=xml_namespaces)
 
-        field_vals = ' '.join(
-            [elm.text for elm in xpath_res if elm.text is not None]
-        )
+        field_vals = [elm.text for elm in xpath_res if elm.text is not None]
 
-        logging.info('Extracted %s = %s' % (field_name, repr(field_vals)))
+        logging.debug('Extracted %s = %s' % (field_name, repr(field_vals)))
 
         output[field_name] = field_vals
 
@@ -419,9 +422,10 @@ def full_index():
             time_recs_sec = 0
 
         logging.info('indexed %s records in %.0fs (~%.3f rec/s) '
-                     'ending with date %s id %s'
-                     % (indexed_count, time_taken, time_recs_sec,
-                        state['last_edit_date'], state['last_id']))
+            'ending with date %s id %s'
+            % (indexed_count, time_taken, time_recs_sec,
+            state['last_edit_date'], state['last_id'])
+        )
 
 
 
